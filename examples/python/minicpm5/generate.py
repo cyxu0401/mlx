@@ -9,7 +9,7 @@ from pathlib import Path
 
 import mlx.core as mx
 from mlx_lm.generate import generate_step, generation_stream, wired_limit
-from mlx_lm.utils import load_model, load_tokenizer
+from mlx_lm.utils import load_config, load_model, load_tokenizer
 
 from . import dspark
 from .model import Model, ModelArgs
@@ -18,7 +18,18 @@ from .model import Model, ModelArgs
 def load_target(path: Path):
     if not path.is_dir():
         raise FileNotFoundError(path)
-    return load_model(path, get_model_classes=lambda config: (Model, ModelArgs))
+    config = load_config(path)
+    if (config.get("quantization_config") or {}).get("format") == "pack-quantized":
+        raise ValueError(
+            "Repack the compressed-tensors checkpoint with "
+            "python -m examples.python.minicpm5.repack SOURCE DESTINATION "
+            "and pass DESTINATION as --model."
+        )
+    return load_model(
+        path,
+        model_config={"model_file": None},
+        get_model_classes=lambda config: (Model, ModelArgs),
+    )
 
 
 def chat_prompt(tokenizer, prompt, thinking=False):

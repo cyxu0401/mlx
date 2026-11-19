@@ -2,6 +2,7 @@
 
 import json
 import math
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -248,7 +249,14 @@ def verify(logits, proposals, draft_distributions, sampling):
     return accepted, mx.random.categorical(residual).item()
 
 
-def generate_step(
+def generate_step(target, draft, prompt, **kwargs):
+    """Yield (token, from_draft) using private target and draft KV caches."""
+    with closing(stream_tokens(target, draft, prompt, **kwargs)) as steps:
+        for token, from_draft, _ in steps:
+            yield token, from_draft
+
+
+def stream_tokens(
     target,
     draft,
     prompt,
@@ -258,8 +266,9 @@ def generate_step(
     stats,
     eos_token_ids=(),
     prefill_step_size=128,
+    prompt_progress_callback=None,
 ):
-    """Yield (token, from_draft) using private target and draft KV caches."""
+    """Yield a token, its draft acceptance flag and its target logits."""
     if (
         prompt.ndim != 1
         or prompt.size == 0
@@ -282,11 +291,15 @@ def generate_step(
             )
             draft.append_context(features, draft_cache)
             mx.eval([entry.state for entry in (*target_cache, *draft_cache)])
+            if prompt_progress_callback:
+                prompt_progress_callback(end, prompt.size)
         logits, features = target.capture(
             prompt[None, -1:], target_cache, capture, last_only=True
         )
         anchor = sampling(logits[0, -1]).item()
-        yield anchor, False
+        if prompt_progress_callback:
+            prompt_progress_callback(prompt.size, prompt.size)
+        yield anchor, False, logits[0, -1]
         if anchor in eos_token_ids or max_tokens == 1:
             return
         draft.append_context(features, draft_cache)
@@ -309,11 +322,11 @@ def generate_step(
             stats.proposed += count
             stats.accepted += accepted
 
-            for token in proposals[:accepted].tolist():
-                yield token, True
+            for index, token in enumerate(proposals[:accepted].tolist()):
+                yield token, True, logits[0, index]
                 if token in eos_token_ids:
                     return
-            yield anchor, False
+            yield anchor, False, logits[0, accepted]
             remaining -= accepted + 1
             if anchor in eos_token_ids or remaining == 0:
                 return
@@ -325,4 +338,4 @@ def generate_step(
 
         if remaining:
             logits = target(mx.array([[anchor]]), cache=target_cache)
-            yield sampling(logits[0, -1]).item(), False
+            yield sampling(logits[0, -1]).item(), False, logits[0, -1]
